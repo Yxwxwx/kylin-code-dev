@@ -8,6 +8,6 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   shims: true,
-  banner: { js: "#!/usr/bin/env node --no-deprecation" },
+  banner: { js: "#!/usr/bin/env -S node --no-deprecation" },
   noExternal: [/./],
 });
