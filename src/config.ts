@@ -8,8 +8,11 @@ export interface KylinConfig {
   apiKey?: string;
   baseURL?: string;
   models?: {
-    deepseek?: { apiKey: string; model?: string; baseURL?: string };
+    deepseek?: { apiKey: string; baseURL?: string };
     dashscope?: { apiKey: string };
+  };
+  rag?: {
+    llmSplit?: boolean;
   };
 }
 
@@ -33,11 +36,16 @@ export function loadProject(dir: string): KylinConfig | null {
   if (!fs.existsSync(p)) return null;
   const c = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, unknown>;
   const models = (c.models as Record<string, unknown> | undefined)?.deepseek as Record<string, unknown> | undefined;
+  const ragCfg = c.rag as Record<string, unknown> | undefined;
   return {
     provider: (c.provider as string) || "deepseek",
-    model: (models?.model as string) || (c.model as string) || "deepseek-v4-flash",
+    // 向后兼容：model 优先取顶层，其次取 models.deepseek.model
+    model: (c.model as string) || (models?.model as string) || "deepseek-v4-flash",
     apiKey: (models?.apiKey as string) || (c.apiKey as string) || undefined,
     baseURL: (models?.baseURL as string) || (c.baseURL as string) || "https://api.deepseek.com",
+    rag: {
+      llmSplit: ragCfg?.llmSplit === true,
+    },
   };
 }
 
@@ -58,11 +66,11 @@ export function initProject(
           deepseek: {
             apiKey,
             baseURL: "https://api.deepseek.com",
-            model,
-            maxTokens: 8192,
-            temperature: 0,
           },
           dashscope: dashscopeKey ? { apiKey: dashscopeKey } : undefined,
+        },
+        rag: {
+          llmSplit: false,
         },
       },
       null,
@@ -91,4 +99,10 @@ export function resolveDashscopeKey(dir: string): string {
   if (process.env.DASHSCOPE_API_KEY) return process.env.DASHSCOPE_API_KEY;
   const g = loadGlobal();
   return ((g.providers as Record<string, unknown> | undefined)?.dashscope as Record<string, unknown> | undefined)?.apiKey as string || "";
+}
+
+/** RAG LLM 拆分开关，默认关闭 */
+export function resolveRagLLMSplit(dir: string): boolean {
+  const proj = loadProject(dir);
+  return proj?.rag?.llmSplit === true;
 }
