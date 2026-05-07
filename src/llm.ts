@@ -1,9 +1,41 @@
 import OpenAI from "openai";
+import { DEEPSEEK_MAX_TOKENS, TEMPERATURE } from "./constants";
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export interface StreamToolCallDelta {
+  index: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface OpenAIDelta {
+  content?: string;
+  reasoning_content?: string;
+  tool_calls?: StreamToolCallDelta[];
+}
+
+interface OpenAIStreamChunk {
+  choices: Array<{
+    delta?: OpenAIDelta;
+    finish_reason?: string | null;
+  }>;
+}
+
+export interface StreamEvent {
+  text: string;
+  toolCalls: ToolCall[];
+  reasoning: string;
+}
 
 export type Message = {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
-  tool_calls?: any[];
+  tool_calls?: ToolCall[];
   tool_call_id?: string;
   reasoning_content?: string;
 };
@@ -17,12 +49,6 @@ export type ToolDef = {
   };
 };
 
-export interface StreamEvent {
-  text: string;
-  toolCalls: any[];
-  reasoning: string;
-}
-
 export async function* chatStream(
   client: OpenAI,
   model: string,
@@ -31,19 +57,20 @@ export async function* chatStream(
 ): AsyncGenerator<StreamEvent> {
   const stream = await client.chat.completions.create({
     model,
-    messages: messages as any,
-    tools: tools as any,
+    messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+    tools: tools as OpenAI.Chat.Completions.ChatCompletionTool[],
     stream: true,
-    temperature: 0,
-    max_tokens: 8192,
+    temperature: TEMPERATURE,
+    max_tokens: DEEPSEEK_MAX_TOKENS,
   });
 
-  const toolCalls: Record<number, any> = {};
-  let reasoning = "",
-    lastSent = 0;
+  const rawToolCalls: Record<number, ToolCall> = {};
+  let reasoning = "";
+  let lastSent = 0;
 
   for await (const chunk of stream) {
-    const d = chunk.choices[0]?.delta as any;
+    const choice = chunk.choices[0] as OpenAIStreamChunk["choices"][0] | undefined;
+    const d = choice?.delta;
 
     if (d?.reasoning_content) reasoning += d.reasoning_content;
     const delta = reasoning.slice(lastSent);
@@ -57,19 +84,21 @@ export async function* chatStream(
     if (d?.tool_calls) {
       for (const tc of d.tool_calls) {
         const i = tc.index;
-        if (!toolCalls[i])
-          toolCalls[i] = {
+        if (!rawToolCalls[i]) {
+          rawToolCalls[i] = {
             id: tc.id || `c${i}`,
             type: "function",
             function: { name: tc.function?.name || "", arguments: "" },
           };
-        if (tc.function?.arguments)
-          toolCalls[i].function.arguments += tc.function.arguments;
+        }
+        if (tc.function?.arguments) {
+          rawToolCalls[i]!.function.arguments += tc.function.arguments;
+        }
       }
     }
 
-    if (chunk.choices[0]?.finish_reason) {
-      yield { text: "", toolCalls: Object.values(toolCalls), reasoning: "" };
+    if (choice?.finish_reason) {
+      yield { text: "", toolCalls: Object.values(rawToolCalls), reasoning: "" };
       reasoning = "";
       lastSent = 0;
     }

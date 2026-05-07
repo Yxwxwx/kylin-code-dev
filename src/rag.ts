@@ -3,6 +3,14 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import OpenAI from "openai";
 import chalk from "chalk";
+import {
+  RAG_CHUNK_SIZE,
+  RAG_CHUNK_OVERLAP,
+  EMBED_BATCH_SIZE,
+  EMBED_CONCURRENCY,
+  EMBED_RETRY_MAX,
+  EMBED_DIMENSIONS,
+} from "./constants";
 
 interface Chunk {
   id: number;
@@ -16,12 +24,9 @@ interface Index {
   docHash: string;
 }
 
-const CHUNK_SIZE = 800,
-  CHUNK_OVERLAP = 100;
-
 function fileTags(relPath: string): string[] {
-  const tags: string[] = [],
-    parts = relPath.split("/");
+  const tags: string[] = [];
+  const parts = relPath.split("/");
   for (let i = 0; i < parts.length - 1; i++) {
     const d = parts[i]!;
     if (d && d !== "examples" && d !== "user") tags.push(d);
@@ -37,9 +42,9 @@ function fileTags(relPath: string): string[] {
 }
 
 function chunkFile(rp: string, c: string): Chunk[] {
-  const ext = path.extname(rp),
-    chunks: Chunk[] = [],
-    tags = fileTags(rp);
+  const ext = path.extname(rp);
+  const chunks: Chunk[] = [];
+  const tags = fileTags(rp);
   const ts = tags.length > 0 ? `[tags: ${tags.join(", ")}]\n` : "";
   const add = (t: string) =>
     chunks.push({ id: 0, file: rp, content: ts + t, embedding: [] });
@@ -47,25 +52,25 @@ function chunkFile(rp: string, c: string): Chunk[] {
     for (const s of c.split(/\n(?=[=\-~^"]{3,}\n)/)) {
       const cl = s.replace(/^[=\-~^"]+\n?/gm, "").trim();
       if (cl.length < 10) continue;
-      if (cl.length > CHUNK_SIZE + CHUNK_OVERLAP)
-        for (let i = 0; i < cl.length; i += CHUNK_SIZE - CHUNK_OVERLAP)
-          add(cl.slice(i, i + CHUNK_SIZE).trim());
+      if (cl.length > RAG_CHUNK_SIZE + RAG_CHUNK_OVERLAP)
+        for (let i = 0; i < cl.length; i += RAG_CHUNK_SIZE - RAG_CHUNK_OVERLAP)
+          add(cl.slice(i, i + RAG_CHUNK_SIZE).trim());
       else add(cl);
     }
   } else if (ext === ".md" || ext === ".txt") {
     for (const s of c.split(/(?=^#{1,3}\s)/m)) {
       const cl = s.trim();
       if (cl.length < 10) continue;
-      if (cl.length > CHUNK_SIZE + CHUNK_OVERLAP)
-        for (let i = 0; i < cl.length; i += CHUNK_SIZE - CHUNK_OVERLAP)
-          add(cl.slice(i, i + CHUNK_SIZE).trim());
+      if (cl.length > RAG_CHUNK_SIZE + RAG_CHUNK_OVERLAP)
+        for (let i = 0; i < cl.length; i += RAG_CHUNK_SIZE - RAG_CHUNK_OVERLAP)
+          add(cl.slice(i, i + RAG_CHUNK_SIZE).trim());
       else add(cl);
     }
   } else {
     const bl = c.split(/\n(?=def |class |async def |# |## )/);
     let cur = "";
     for (const b of bl) {
-      if (cur.length + b.length > CHUNK_SIZE && cur.length > 100) {
+      if (cur.length + b.length > RAG_CHUNK_SIZE && cur.length > 100) {
         add(cur.trim());
         cur = b;
       } else cur += (cur ? "\n" : "") + b;
@@ -90,9 +95,9 @@ function docsHash(d: string): string {
 }
 
 function cosine(a: number[], b: number[]): number {
-  let dot = 0,
-    na = 0,
-    nb = 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i]! * b[i]!;
     na += a[i]! * a[i]!;
@@ -107,15 +112,15 @@ function embedWith(k: string) {
     baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   });
   return async (ts: string[]): Promise<number[][]> => {
-    for (let a = 0; a < 3; a++) {
+    for (let a = 0; a < EMBED_RETRY_MAX; a++) {
       try {
         const r = await cl.embeddings.create({
           model: "text-embedding-v4",
           input: ts,
-          dimensions: 1024,
+          dimensions: EMBED_DIMENSIONS,
         });
         return r.data.map((d) => d.embedding);
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (String(e).match(/429|Throttling|Rate/)) {
           await new Promise((r) => setTimeout(r, (a + 1) * 2000));
           continue;
@@ -132,8 +137,8 @@ function log(m: string) {
 }
 
 async function buildIndex(dd: string, ak: string): Promise<Index> {
-  const em = embedWith(ak),
-    ac: Chunk[] = [];
+  const em = embedWith(ak);
+  const ac: Chunk[] = [];
   (function w(dir: string) {
     if (!fs.existsSync(dir)) return;
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -149,30 +154,45 @@ async function buildIndex(dd: string, ak: string): Promise<Index> {
         ac.push(
           ...chunkFile(path.relative(dd, fp), fs.readFileSync(fp, "utf-8")),
         );
-      } catch {}
+      } catch {
+        // 跳过不可读文件
+      }
     }
   })(dd);
   log(`文档分块完成: ${ac.length} chunks`);
-  const B = 10,
-    CC = 10,
-    st = Date.now();
-  for (let i = 0; i < ac.length; i += B * CC) {
-    const js: Promise<void>[] = [];
-    for (let j = 0; j < CC && i + j * B < ac.length; j++) {
-      const bt = ac.slice(i + j * B, i + (j + 1) * B);
-      js.push(
-        em(bt.map((c) => c.content)).then((es) =>
-          bt.forEach((c, k) => (c.embedding = es[k]!)),
-        ),
+
+  const st = Date.now();
+  let failedChunks = 0;
+
+  for (let i = 0; i < ac.length; i += EMBED_BATCH_SIZE * EMBED_CONCURRENCY) {
+    const jobs: Promise<number>[] = [];
+    for (let j = 0; j < EMBED_CONCURRENCY && i + j * EMBED_BATCH_SIZE < ac.length; j++) {
+      const bt = ac.slice(i + j * EMBED_BATCH_SIZE, i + (j + 1) * EMBED_BATCH_SIZE);
+      jobs.push(
+        em(bt.map((c) => c.content))
+          .then((es) => {
+            bt.forEach((c, k) => (c.embedding = es[k]!));
+            return 0;
+          })
+          .catch(() => bt.length), // 返回失败数量
       );
     }
-    await Promise.all(js);
-    log(`embedding 进度: ${Math.min(i + B * CC, ac.length)}/${ac.length}`);
+    const results = await Promise.allSettled(jobs);
+    for (const r of results) {
+      if (r.status === "rejected") failedChunks += EMBED_BATCH_SIZE;
+      else failedChunks += r.value;
+    }
+    log(
+      `embedding 进度: ${Math.min(i + EMBED_BATCH_SIZE * EMBED_CONCURRENCY, ac.length)}/${ac.length}`,
+    );
   }
+
+  if (failedChunks > 0) log(`注意: ${failedChunks} chunks embedding 失败`);
+
   const vd = ac.filter((c) => c.embedding.length > 0);
   vd.forEach((c, i) => (c.id = i));
   log(
-    `索引构建完成: ${vd.length} chunks, ${((Date.now() - st) / 1000).toFixed(1)}s`,
+    `索引构建完成: ${vd.length} chunks (${ac.length - vd.length} 跳过), ${((Date.now() - st) / 1000).toFixed(1)}s`,
   );
   return {
     chunks: vd,
@@ -190,8 +210,8 @@ function cachePath(dd: string): string {
 }
 
 async function ensureIndex(dd: string, ak: string): Promise<Index> {
-  const cp = cachePath(dd),
-    ch = docsHash(dd);
+  const cp = cachePath(dd);
+  const ch = docsHash(dd);
   if (fs.existsSync(cp)) {
     try {
       const ca: Index = JSON.parse(fs.readFileSync(cp, "utf-8"));
@@ -199,13 +219,17 @@ async function ensureIndex(dd: string, ak: string): Promise<Index> {
         log(`索引缓存命中: ${ca.chunks.length} chunks`);
         return ca;
       }
-    } catch {}
+    } catch {
+      // 缓存损坏，重建
+    }
   }
   log("开始构建索引...");
   const ix = await buildIndex(dd, ak);
   try {
     fs.writeFileSync(cp, JSON.stringify(ix));
-  } catch {}
+  } catch {
+    // 写入缓存失败不影响使用
+  }
   return ix;
 }
 
@@ -414,9 +438,9 @@ const DOMAIN_GATE: Record<string, string[]> = {
 };
 
 function keywordBoost(q: string, c: string, f: string): number {
-  const ql = q.toLowerCase(),
-    cl = c.toLowerCase(),
-    fl = f.toLowerCase();
+  const ql = q.toLowerCase();
+  const cl = c.toLowerCase();
+  const fl = f.toLowerCase();
   let b = 0;
   for (const ts of Object.values(KW_MAP)) {
     if (ts.some((t) => ql.includes(t)) && ts.some((t) => cl.includes(t)))
@@ -444,7 +468,7 @@ function translateQuery(cn: string): string {
   for (const ts of Object.values(KW_MAP)) {
     const en = ts[0]!;
     for (const t of ts) {
-      if (/[\u4e00-\u9fff]/.test(t) && o.includes(t))
+      if (/[一-鿿]/.test(t) && o.includes(t))
         o = o.replace(new RegExp(t, "g"), en);
     }
   }
@@ -456,6 +480,7 @@ export async function queryDocs(
   q: string,
   ak: string,
   topK = 8,
+  queryEn?: string,
 ): Promise<{ content: string; file: string; score: number }[]> {
   if (!ak) {
     log("DashScope API Key 未设置，跳过 RAG");
@@ -466,11 +491,11 @@ export async function queryDocs(
     log("索引为空，跳过 RAG");
     return [];
   }
-  const eq = translateQuery(q);
-  if (eq !== q) log(`查询翻译: ${eq}`);
-  const em = embedWith(ak),
-    qe = await em([eq]),
-    qv = qe[0]!;
+  // embedding 用 LLM 翻译的英文 query，没有则回退到旧关键词替换
+  const eq = queryEn || translateQuery(q);
+  const em = embedWith(ak);
+  const qe = await em([eq]);
+  const qv = qe[0]!;
   const sc = ix.chunks.map((c) => ({
     content: c.content,
     file: c.file,
@@ -480,8 +505,8 @@ export async function queryDocs(
       domainPenalty(q, c.file),
   }));
   sc.sort((a, b) => b.score - a.score);
-  const sn = new Set<string>(),
-    dd2: typeof sc = [];
+  const sn = new Set<string>();
+  const dd2: typeof sc = [];
   for (const r of sc) {
     if (sn.has(r.file)) continue;
     sn.add(r.file);
@@ -498,6 +523,8 @@ export async function queryDocs(
 export async function rebuildIndex(dd: string, ak: string): Promise<void> {
   try {
     fs.unlinkSync(cachePath(dd));
-  } catch {}
+  } catch {
+    // 缓存文件不存在
+  }
   await ensureIndex(dd, ak);
 }

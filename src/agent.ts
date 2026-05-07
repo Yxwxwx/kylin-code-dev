@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import chalk from "chalk";
-import { chatStream, type Message, type ToolDef } from "./llm";
+import { chatStream, type Message, type ToolDef, type ToolCall } from "./llm";
 import { allTools, type Tool } from "./tools";
 import {
   getPrompt,
@@ -12,6 +12,7 @@ import {
 import { trimMessages } from "./session";
 import { resolveDashscopeKey } from "./config";
 import { queryDocs } from "./rag";
+import { MAX_TOOL_LOOP, DEFAULT_TOKEN_BUDGET } from "./constants";
 
 export class Agent {
   private client: OpenAI;
@@ -76,7 +77,7 @@ export class Agent {
       }
       let basePrompt = getPrompt(this.activePrompt) || DEFAULT_PROMPT;
       if (this.activePrompt === "qc") {
-        basePrompt = basePrompt.replace(/\${PYSCF_DOCS}/g, getQcDocsPath());
+        basePrompt = basePrompt.replace(/\$\{PYSCF_DOCS}/g, getQcDocsPath());
       }
       this.messages.push({
         role: "system",
@@ -95,7 +96,7 @@ export class Agent {
         chalk.gray(`  [QC] DashScope key: ${dk ? "已设置" : "未设置"}`),
       );
       if (dk) {
-        const query = input
+        const rawQuery = input
           .replace(/```[\s\S]*?```/g, "")
           .replace(
             /\b(atom|basis|spin|charge|verbose|symmetry)\s*[=:]\s*[^,\n)]+/gi,
@@ -104,7 +105,18 @@ export class Agent {
           .replace(/,/g, " ")
           .replace(/\s+/g, " ")
           .trim();
-        const results = await queryDocs(getQcDocsPath(), query || input, dk, 8);
+        const query = rawQuery || input;
+
+        // LLM 翻译中文 query → 自然英文，提升 embedding 匹配精度
+        let queryEn: string | undefined;
+        try {
+          queryEn = await this.translateForRag(query);
+          console.log(chalk.gray(`  [QC] 英译: ${queryEn}`));
+        } catch {
+          console.log(chalk.gray("  [QC] LLM 翻译失败，回退到内置翻译"));
+        }
+
+        const results = await queryDocs(getQcDocsPath(), query, dk, 8, queryEn);
         if (results.length > 0) {
           const ragBlock = results
             .map(
@@ -117,6 +129,8 @@ export class Agent {
       }
     }
 
+    // 保存快照用于错误回滚
+    const snapshotLength = this.messages.length;
     this.messages.push({ role: "user", content: userContent });
     this.hadWrites = false;
 
@@ -129,13 +143,14 @@ export class Agent {
         await this.toolLoop(onText, onConfirm, onThinking);
       }
     } catch (e) {
-      this.messages.pop();
+      // 回滚到 user 消息之前，包括去掉可能已添加的 assistant/tool 消息
+      this.messages = this.messages.slice(0, snapshotLength);
       throw e;
     }
   }
 
   private applyTokenBudget(): void {
-    const { messages: trimmed, trimmed: count } = trimMessages(this.messages);
+    const { messages: trimmed, trimmed: count } = trimMessages(this.messages, DEFAULT_TOKEN_BUDGET);
     if (count > 0) {
       this.messages = trimmed;
       if (this.onTrimmed) this.onTrimmed(count);
@@ -147,10 +162,11 @@ export class Agent {
     onConfirm: (msg: string) => Promise<boolean>,
     onThinking?: (t: string) => void,
   ): Promise<void> {
-    for (let i = 0; i < 10; i++) {
-      let text = "",
-        reasoning = "",
-        tcs: any[] = [];
+    for (let i = 0; i < MAX_TOOL_LOOP; i++) {
+      let text = "";
+      let reasoning = "";
+      let tcs: ToolCall[] = [];
+
       const stream = chatStream(
         this.client,
         this.model,
@@ -168,13 +184,13 @@ export class Agent {
         }
         if (c.toolCalls.length) tcs = c.toolCalls;
       }
+
       if (tcs.length === 0) {
-        this.messages.push({ role: "assistant", content: text || null });
-        break;
+        this.messages.push({ role: "assistant", content: text || "" });
+        return;
       }
 
-      const am: any = { role: "assistant", tool_calls: tcs };
-      if (text) am.content = text;
+      const am: Message = { role: "assistant", content: text || "", tool_calls: tcs };
       if (reasoning) am.reasoning_content = reasoning;
       this.messages.push(am);
 
@@ -203,9 +219,10 @@ export class Agent {
           });
           continue;
         }
+
         if (tool.needConfirm) {
-          const msg = tool.needConfirm(params);
-          if (msg && !(await onConfirm(msg))) {
+          const cf = tool.needConfirm(params);
+          if (cf.needed && !(await onConfirm(cf.message || ""))) {
             this.messages.push({
               role: "tool",
               content: "用户拒绝",
@@ -214,9 +231,10 @@ export class Agent {
             continue;
           }
         }
+
         const result = await tool
           .run("", params)
-          .catch((e) => `失败: ${(e as Error).message}`);
+          .catch((e: Error) => `失败: ${e.message}`);
         this.messages.push({
           role: "tool",
           content: result,
@@ -224,5 +242,33 @@ export class Agent {
         });
       }
     }
+
+    // 循环耗尽：请求最终响应（不带工具）
+    const finalStream = chatStream(this.client, this.model, this.messages, []);
+    let finalText = "";
+    for await (const c of finalStream) {
+      if (c.reasoning && onThinking) onThinking(c.reasoning);
+      if (c.text) {
+        finalText += c.text;
+        onText(c.text);
+      }
+    }
+    if (finalText) {
+      this.messages.push({ role: "assistant", content: finalText });
+    }
+  }
+
+  /** 用 LLM 将中文量子化学 query 翻译为自然英文，提升 embedding 匹配精度 */
+  private async translateForRag(query: string): Promise<string> {
+    const resp = await this.client.chat.completions.create({
+      model: this.model,
+      messages: [
+        { role: "system", content: "你是翻译器，将用户输入翻译成英文。只输出英文译文。" },
+        { role: "user", content: `请翻译为英文:\n${query}` },
+      ],
+      temperature: 0,
+      max_tokens: 256,
+    });
+    return resp.choices[0]?.message?.content?.trim() || query;
   }
 }

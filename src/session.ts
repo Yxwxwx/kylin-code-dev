@@ -2,6 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import type { Message } from "./llm";
+import {
+  SESSION_TRUNCATE_CHARS,
+  DEFAULT_TOKEN_BUDGET,
+  CHARS_PER_TOKEN,
+} from "./constants";
 
 const SESSIONS_DIR = path.join(os.homedir(), ".kylin", "sessions");
 
@@ -30,8 +35,8 @@ export function saveSession(
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const file = path.join(dir, `${ts}.json`);
   const cleaned = messages.map((m) => {
-    if (m.role === "tool" && m.content && m.content.length > 8000) {
-      return { ...m, content: m.content.slice(0, 8000) + "\n...(已截断)" };
+    if (m.role === "tool" && m.content && m.content.length > SESSION_TRUNCATE_CHARS) {
+      return { ...m, content: m.content.slice(0, SESSION_TRUNCATE_CHARS) + "\n...(已截断)" };
     }
     return m;
   });
@@ -58,7 +63,11 @@ export function loadSession(
 ): { messages: Message[]; model: string; promptMode: string } | null {
   if (!fs.existsSync(filePath)) return null;
   try {
-    const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as {
+      messages?: Message[];
+      model?: string;
+      promptMode?: string;
+    };
     return {
       messages: data.messages || [],
       model: data.model || "",
@@ -80,7 +89,12 @@ export function listSessions(rootDir: string): SessionMeta[] {
   return files.map((f) => {
     const fp = path.join(dir, f);
     try {
-      const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
+      const raw = JSON.parse(fs.readFileSync(fp, "utf-8")) as {
+        messages?: Message[];
+        createdAt?: string;
+        promptMode?: string;
+        model?: string;
+      };
       const messages: Message[] = raw.messages || [];
       const firstUser = messages.find((m) => m.role === "user");
       return {
@@ -123,9 +137,6 @@ export function deleteAllSessions(rootDir: string): number {
 // Token 预算管理
 // ============================================================
 
-const CHARS_PER_TOKEN = 2.5;
-const DEFAULT_BUDGET = 120_000;
-
 function estimateTokens(messages: Message[]): number {
   let total = 0;
   for (const m of messages) {
@@ -141,7 +152,7 @@ function estimateTokens(messages: Message[]): number {
 
 export function trimMessages(
   messages: Message[],
-  budget: number = DEFAULT_BUDGET,
+  budget: number = DEFAULT_TOKEN_BUDGET,
 ): { messages: Message[]; trimmed: number } {
   const current = estimateTokens(messages);
   if (current <= budget) return { messages, trimmed: 0 };
@@ -171,7 +182,7 @@ export function getTokenUsage(messages: Message[]): {
   const estimated = estimateTokens(messages);
   return {
     estimated,
-    budget: DEFAULT_BUDGET,
-    percent: Math.round((estimated / DEFAULT_BUDGET) * 100),
+    budget: DEFAULT_TOKEN_BUDGET,
+    percent: Math.round((estimated / DEFAULT_TOKEN_BUDGET) * 100),
   };
 }
