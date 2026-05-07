@@ -141,7 +141,7 @@ async function main() {
       pagerOn,
     });
     if (cmd.handled) {
-      if (cmd.toggleThink) showThinking = !showThinking;
+      if (cmd.toggleLess) showThinking = !showThinking;
       if (cmd.togglePager) pagerOn = !pagerOn;
       return;
     }

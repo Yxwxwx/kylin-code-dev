@@ -51,7 +51,7 @@ kylin-code /path/to/project
 | `?` `/help` | 显示帮助 |
 | `/exit` `/quit` | 退出 |
 | `/clear` | 重置上下文 |
-| `/think` | 切换思考内容显示/隐藏 |
+| `/less` | 切换思考内容显示/隐藏（/less） |
 | `/pager` | 切换长输出分页 |
 | `/history` | 历史会话列表 |
 | `/history load <n>` | 恢复第 n 个会话 |
@@ -142,7 +142,7 @@ kylin-code /path/to/project
 src/
 ├── index.ts      # REPL 主循环 + 组件装配
 ├── agent.ts      # Agent 核心：tool calling + token 预算
-├── commands.ts   # 命令分发（/think /pager /history /qc ...）
+├── commands.ts   # 命令分发（/less /pager /history /qc ...）
 ├── renderer.ts   # 流式代码块渲染 + cli-highlight
 ├── display.ts    # 圆环/框线/prompt/动画/分页
 ├── llm.ts        # DeepSeek 流式对话

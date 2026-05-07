@@ -2,13 +2,18 @@ import * as readline from "node:readline";
 import chalk from "chalk";
 import type { Agent } from "./agent";
 import { listPrompts } from "./prompts";
-import { listSessions, loadSession, deleteSession } from "./session";
+import {
+  listSessions,
+  loadSession,
+  deleteSession,
+  deleteAllSessions,
+} from "./session";
 import { setAgentPrompt } from "./display";
 
 export interface CmdResult {
   handled: boolean;
   shouldExit: boolean;
-  toggleThink?: boolean;
+  toggleLess?: boolean;
   togglePager?: boolean;
 }
 
@@ -47,15 +52,13 @@ export function handleCommand(input: string, c: CmdContext): CmdResult {
     const prompts = listPrompts()
       .map((p) => chalk.cyan(`/${p.name}`) + " " + p.label)
       .join("  ");
-    console.log(
-      chalk.gray(`  /exit /clear /history /think /pager  ${prompts}`),
-    );
+    console.log(chalk.gray(`  /exit /clear /history /less /pager  ${prompts}`));
     setAgentPrompt(c.rl, c.agent);
     c.rl.prompt();
     return { handled: true, shouldExit: false };
   }
 
-  if (input === "/think") {
+  if (input === "/less") {
     console.log(
       chalk.gray(
         `  思考内容: ${!c.showThinking ? "显示" : "隐藏 (Thinking...)"}`,
@@ -63,7 +66,7 @@ export function handleCommand(input: string, c: CmdContext): CmdResult {
     );
     setAgentPrompt(c.rl, c.agent);
     c.rl.prompt();
-    return { handled: true, shouldExit: false, toggleThink: true };
+    return { handled: true, shouldExit: false, toggleLess: true };
   }
 
   if (input === "/pager") {
@@ -71,6 +74,15 @@ export function handleCommand(input: string, c: CmdContext): CmdResult {
     setAgentPrompt(c.rl, c.agent);
     c.rl.prompt();
     return { handled: true, shouldExit: false, togglePager: true };
+  }
+
+  // --- /history ---
+  if (input === "/history del all") {
+    const count = deleteAllSessions(c.rootDir);
+    console.log(chalk.green(`  ✔ 已删除 ${count} 个历史会话`));
+    setAgentPrompt(c.rl, c.agent);
+    c.rl.prompt();
+    return { handled: true, shouldExit: false };
   }
 
   if (input === "/history") {
@@ -82,15 +94,14 @@ export function handleCommand(input: string, c: CmdContext): CmdResult {
       sessions.forEach((ses, i) => {
         const date = ses.createdAt.slice(0, 19).replace("T", " ");
         const idx = chalk.cyan(String(i + 1));
-        const info = chalk.gray(
-          `${date}  ${ses.messageCount}条  ${ses.promptMode}`,
-        );
         console.log(`  ${idx}  ${ses.preview}`);
-        console.log(`     ${info}`);
+        console.log(
+          `     ${chalk.gray(`${date}  ${ses.messageCount}条  ${ses.promptMode}`)}`,
+        );
       });
       console.log(
         chalk.gray(
-          `\n  /history load <序号>  恢复会话  |  /history del <序号>  删除会话`,
+          `\n  /history load <n> 恢复  |  /history del <n> 删除  |  /history del all 清空`,
         ),
       );
     }

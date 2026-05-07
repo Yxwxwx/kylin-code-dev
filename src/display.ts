@@ -1,4 +1,3 @@
-
 import * as readline from "node:readline";
 import chalk from "chalk";
 import { getTokenUsage } from "./session";
@@ -43,48 +42,29 @@ export function printInputFrame(input: string, agent: Agent): void {
 export function setAgentPrompt(rl: readline.Interface, agent: Agent): void {
   const ring = renderTokenRing(getTokenUsage(agent.getMessages()).percent);
   const mode =
-    agent.getPrompt() === "general"
-      ? ""
-      : chalk.gray(` ${agent.getPrompt()}`);
+    agent.getPrompt() === "general" ? "" : chalk.gray(` ${agent.getPrompt()}`);
   rl.setPrompt(ring + chalk.gray(" >") + mode + " ");
 }
 
 // ============================================================
-// 思考动画（隐藏模式）
+// 思考指示器（隐藏模式，单行，不闪烁避免冲突）
 // ============================================================
 
 export function createDotAnim() {
-  let timer: ReturnType<typeof setInterval> | null = null;
-  let dotCount = 0;
-  let paused = false;
+  let thinking = false;
 
   const start = () => {
-    dotCount = 0;
-    paused = false;
-    process.stdout.write("\n" + chalk.gray.dim("Thinking."));
-    timer = setInterval(() => {
-      if (paused) return;
-      dotCount = (dotCount + 1) % 6;
-      process.stdout.write(
-        "\r" + chalk.gray.dim("Thinking" + ".".repeat(dotCount + 1)),
-      );
-    }, 400);
+    if (thinking) return;
+    thinking = true;
+    process.stdout.write("\n" + chalk.gray.dim("Thinking...\n"));
   };
 
   const stop = () => {
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-      process.stdout.write("\r\x1b[2K");
-    }
+    thinking = false;
   };
 
-  const pause = () => {
-    paused = true;
-  };
-  const resume = () => {
-    paused = false;
-  };
+  const pause = () => {};
+  const resume = () => {};
 
   return { start, stop, pause, resume };
 }
