@@ -41,7 +41,7 @@ function readFile(root: string): Tool {
       type: "function",
       function: {
         name: "read_file",
-        description: "读取文件内容",
+        description: "Read file contents with optional line range",
         parameters: {
           type: "object",
           properties: {
@@ -55,7 +55,7 @@ function readFile(root: string): Tool {
     },
     async run(_, p) {
       const r = path.resolve(root, p.filePath as string);
-      if (!fs.existsSync(r)) return "文件不存在";
+      if (!fs.existsSync(r)) return "File not found";
       const lines = fs.readFileSync(r, "utf-8").split("\n");
       const s = Math.max(1, Number(p.startLine) || 1);
       const e = Math.min(lines.length, Number(p.endLine) || lines.length);
@@ -73,7 +73,7 @@ function writeFile(root: string): Tool {
       type: "function",
       function: {
         name: "write_file",
-        description: "创建或覆盖文件",
+        description: "Create or overwrite a file",
         parameters: {
           type: "object",
           properties: {
@@ -92,7 +92,7 @@ function writeFile(root: string): Tool {
       const d = path.dirname(r);
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
       fs.writeFileSync(r, p.content as string, "utf-8");
-      return `已写入 ${p.filePath}`;
+      return `Written ${p.filePath}`;
     },
   };
 }
@@ -103,7 +103,7 @@ function deleteFile(root: string): Tool {
       type: "function",
       function: {
         name: "delete_file",
-        description: "删除文件",
+        description: "Delete a file",
         parameters: {
           type: "object",
           properties: { filePath: { type: "string" } },
@@ -116,9 +116,9 @@ function deleteFile(root: string): Tool {
     },
     async run(_, p) {
       const r = path.resolve(root, p.filePath as string);
-      if (!fs.existsSync(r)) return `文件不存在: ${p.filePath}`;
+      if (!fs.existsSync(r)) return `File not found: ${p.filePath}`;
       fs.unlinkSync(r);
-      return `已删除 ${p.filePath}`;
+      return `Deleted ${p.filePath}`;
     },
   };
 }
@@ -129,7 +129,7 @@ function listDir(root: string): Tool {
       type: "function",
       function: {
         name: "list_directory",
-        description: "列出目录结构",
+        description: "List directory tree structure",
         parameters: {
           type: "object",
           properties: {
@@ -142,7 +142,7 @@ function listDir(root: string): Tool {
     },
     async run(_, p) {
       const d = path.resolve(root, (p.dirPath as string) || ".");
-      if (!fs.existsSync(d)) return "目录不存在";
+      if (!fs.existsSync(d)) return "Directory not found";
       return tree(d, "", (p.depth as number) || 3, 0);
     },
   };
@@ -186,7 +186,7 @@ function search(root: string): Tool {
       type: "function",
       function: {
         name: "search_code",
-        description: "搜索代码（正则）",
+        description: "Search code with regex pattern",
         parameters: {
           type: "object",
           properties: {
@@ -210,7 +210,7 @@ function search(root: string): Tool {
         : null;
       const results: string[] = [];
       walk(d, d, regex, extF, results, SEARCH_MAX_RESULTS);
-      return results.length ? results.join("\n") : `无匹配 "${p.pattern}"`;
+      return results.length ? results.join("\n") : `No match for "${p.pattern}"`;
     },
   };
 }
@@ -294,7 +294,7 @@ function runCmd(root: string): Tool {
       type: "function",
       function: {
         name: "run_command",
-        description: "执行 shell 命令",
+        description: "Execute a shell command",
         parameters: {
           type: "object",
           properties: { command: { type: "string" } },
@@ -315,7 +315,7 @@ function runCmd(root: string): Tool {
         let err = "";
         const t = setTimeout(() => {
           ch.kill();
-          resolve("超时");
+          resolve("Timed out");
         }, COMMAND_TIMEOUT_MS);
         ch.stdout?.on("data", (d: Buffer) => {
           const s = d.toString();
@@ -346,7 +346,7 @@ function runCmd(root: string): Tool {
         });
         ch.on("error", (e) => {
           clearTimeout(t);
-          resolve(`失败: ${e.message}`);
+          resolve(`Failed: ${e.message}`);
         });
       });
     },
@@ -359,16 +359,16 @@ function gitDiff(root: string): Tool {
       type: "function",
       function: {
         name: "git_diff",
-        description: "Git 变更",
+        description: "Show git diff of changes",
         parameters: { type: "object", properties: {}, required: [] },
       },
     },
     async run() {
       try {
         const d = await simpleGit(root).diff();
-        return d || "无变更";
+        return d || "No changes";
       } catch {
-        return "Git 不可用";
+        return "Git unavailable";
       }
     },
   };
@@ -380,7 +380,7 @@ function gitStatus(root: string): Tool {
       type: "function",
       function: {
         name: "git_status",
-        description: "Git 状态",
+        description: "Show git working tree status",
         parameters: { type: "object", properties: {}, required: [] },
       },
     },
@@ -392,9 +392,9 @@ function gitStatus(root: string): Tool {
         if (s.modified.length) ls.push("modified: " + s.modified.join(", "));
         if (s.created.length) ls.push("new: " + s.created.join(", "));
         if (s.deleted.length) ls.push("deleted: " + s.deleted.join(", "));
-        return ls.join("\n") || "干净";
+        return ls.join("\n") || "Clean";
       } catch {
-        return "Git 不可用";
+        return "Git unavailable";
       }
     },
   };
@@ -406,7 +406,7 @@ function gitLog(root: string): Tool {
       type: "function",
       function: {
         name: "git_log",
-        description: "提交历史",
+        description: "Show git commit history",
         parameters: {
           type: "object",
           properties: { count: { type: "number" } },
@@ -423,7 +423,7 @@ function gitLog(root: string): Tool {
           )
           .join("\n");
       } catch {
-        return "Git 不可用";
+        return "Git unavailable";
       }
     },
   };

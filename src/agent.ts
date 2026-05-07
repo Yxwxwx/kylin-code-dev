@@ -83,7 +83,7 @@ export class Agent {
         role: "system",
         content:
           basePrompt +
-          `\n\n工作目录: ${this.rootDir}\n所有文件读写和命令执行都基于此目录。`,
+          `\n\nWorking directory: ${this.rootDir}\nAll file read/write and command execution is relative to this directory.`,
       });
     }
 
@@ -107,16 +107,35 @@ export class Agent {
           .trim();
         const query = rawQuery || input;
 
-        // LLM 翻译中文 query → 自然英文，提升 embedding 匹配精度
-        let queryEn: string | undefined;
+        // LLM 翻译 + 分解复合查询，每条子查询独立检索
+        let subQueries: string[] = [];
         try {
-          queryEn = await this.translateForRag(query);
-          console.log(chalk.gray(`  [QC] 英译: ${queryEn}`));
+          const d = await this.translateAndDecompose(query);
+          if (d.translated !== query) {
+            console.log(chalk.gray(`  [QC] 英译: ${d.translated}`));
+          }
+          subQueries = d.queries;
         } catch {
           console.log(chalk.gray("  [QC] LLM 翻译失败，回退到内置翻译"));
         }
 
-        const results = await queryDocs(getQcDocsPath(), query, dk, 8, queryEn);
+        // 每条子查询独立 RAG，合并去重（按文件保留最高分）
+        const topK = Math.ceil(10 / Math.max(1, subQueries.length));
+        const all = (
+          await Promise.all(
+            (subQueries.length ? subQueries : [undefined]).map((qen) =>
+              queryDocs(getQcDocsPath(), query, dk, topK, qen),
+            ),
+          )
+        ).flat();
+        const dedup = new Map<string, (typeof all)[number]>();
+        for (const r of all) {
+          const prev = dedup.get(r.file);
+          if (!prev || r.score > prev.score) dedup.set(r.file, r);
+        }
+        const results = [...dedup.values()]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 8);
         if (results.length > 0) {
           const ragBlock = results
             .map(
@@ -124,7 +143,7 @@ export class Agent {
                 `### ${r.file} (score: ${r.score.toFixed(3)})\n\`\`\`\n${r.content}\n\`\`\``,
             )
             .join("\n\n");
-          userContent = `## 检索到的相关文档\n\n${ragBlock}\n\n---\n\n用户问题: ${input}`;
+          userContent = `## Retrieved documentation\n\n${ragBlock}\n\n---\n\nUser question: ${input}`;
         }
       }
     }
@@ -138,7 +157,7 @@ export class Agent {
       this.applyTokenBudget();
       await this.toolLoop(onText, onConfirm, onThinking);
       if (this.hadWrites && this.activePrompt !== "qc") {
-        this.messages.push({ role: "user", content: "运行验证，通过则结束。" });
+        this.messages.push({ role: "user", content: "Verify the changes work. If they pass, stop." });
         this.applyTokenBudget();
         await this.toolLoop(onText, onConfirm, onThinking);
       }
@@ -201,7 +220,7 @@ export class Agent {
         if (!tool) {
           this.messages.push({
             role: "tool",
-            content: "未知工具",
+            content: "Unknown tool",
             tool_call_id: tc.id,
           });
           continue;
@@ -214,7 +233,7 @@ export class Agent {
         } catch {
           this.messages.push({
             role: "tool",
-            content: "参数解析失败",
+            content: "Failed to parse arguments",
             tool_call_id: tc.id,
           });
           continue;
@@ -225,7 +244,7 @@ export class Agent {
           if (cf.needed && !(await onConfirm(cf.message || ""))) {
             this.messages.push({
               role: "tool",
-              content: "用户拒绝",
+              content: "Denied by user",
               tool_call_id: tc.id,
             });
             continue;
@@ -234,7 +253,7 @@ export class Agent {
 
         const result = await tool
           .run("", params)
-          .catch((e: Error) => `失败: ${e.message}`);
+          .catch((e: Error) => `Failed: ${e.message}`);
         this.messages.push({
           role: "tool",
           content: result,
@@ -258,17 +277,62 @@ export class Agent {
     }
   }
 
-  /** 用 LLM 将中文量子化学 query 翻译为自然英文，提升 embedding 匹配精度 */
-  private async translateForRag(query: string): Promise<string> {
-    const resp = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [
-        { role: "system", content: "你是翻译器，将用户输入翻译成英文。只输出英文译文。" },
-        { role: "user", content: `请翻译为英文:\n${query}` },
-      ],
-      temperature: 0,
-      max_tokens: 256,
-    });
-    return resp.choices[0]?.message?.content?.trim() || query;
+  /**
+   * 两步 LLM 调用：先翻译（中文 prompt，DeepSeek Flash 对此更可靠），
+   * 再对英文译文做查询分解。翻译失败或含中文则回退到 rag.ts 内置 translateQuery。
+   */
+  private async translateAndDecompose(query: string): Promise<{
+    translated: string;
+    queries: string[];
+  }> {
+    // Step 1 — 翻译（中文指令，模型响应更稳定）
+    let translated = query;
+    try {
+      const t = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: "system", content: "你是翻译器，只输出英文译文。" },
+          { role: "user", content: `翻译为英文:\n${query}` },
+        ],
+        temperature: 0,
+        max_tokens: 256,
+      });
+      const text = t.choices[0]?.message?.content?.trim() || "";
+      if (text && !/[一-鿿]/.test(text)) translated = text;
+    } catch {
+      // 网络错误等，沿用原始 query
+    }
+
+    if (translated === query) return { translated, queries: [] };
+
+    // Step 2 — 分解复合查询（英文 prompt，尝试拆分多个独立话题）
+    let queries = [translated];
+    try {
+      const d = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "If the query covers multiple distinct chemistry topics (method, basis set, geometry optimization, frequency analysis, solvent, excited state, active space, etc.), split into 2-3 focused English search queries. Output one query per line, no extra text.",
+          },
+          { role: "user", content: translated },
+        ],
+        temperature: 0,
+        max_tokens: 256,
+      });
+      const lines = (d.choices[0]?.message?.content?.trim() || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && !/[一-鿿]/.test(s));
+      if (lines.length > 1) {
+        queries = lines;
+        console.log(chalk.gray(`  [QC] 拆分为 ${queries.length} 个子查询`));
+      }
+    } catch {
+      // 分解失败无所谓，用单条译文检索
+    }
+
+    return { translated, queries };
   }
 }

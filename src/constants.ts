@@ -3,7 +3,7 @@
 // ============================================================
 
 // --- Agent ---
-export const MAX_TOOL_LOOP = 10;
+export const MAX_TOOL_LOOP = 20;
 export const DEFAULT_TOKEN_BUDGET = 120_000;
 export const CHARS_PER_TOKEN = 2.5;
 
